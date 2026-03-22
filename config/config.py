@@ -10,7 +10,11 @@ import torch
 
 
 # ── Dataset ────────────────────────────────────────────
-DATAROOT = os.path.expanduser('~/Downloads/nuscenes_data')
+DATAROOT = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    'dataset',
+    'nuscenes_data'
+)
 VERSION  = 'v1.0-mini'
 
 # ── Camera ─────────────────────────────────────────────
