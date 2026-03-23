@@ -1,0 +1,317 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <title>BEV Occupancy Predictor</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <link href="/static/css/style.css" rel="stylesheet"/>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body>
+
+<!-- Header -->
+<header class="app-header">
+  <div class="brand">
+    <span class="logo">🚗</span>
+    <div>
+      <h1>BEV Occupancy Predictor</h1>
+      <p class="subtitle">
+        MAHE Mobility Hackathon 2026 — Problem Statement 3
+      </p>
+    </div>
+  </div>
+  <div class="model-badge" id="model-badge">
+    Loading model...
+  </div>
+</header>
+
+<!-- Navigation -->
+<nav class="tab-nav">
+  <button class="tab-btn active" data-tab="sample">
+    📷 Sample Browser
+  </button>
+  <button class="tab-btn" data-tab="video">
+    🎥 Video Upload
+  </button>
+  <button class="tab-btn" data-tab="about">
+    ℹ️ About
+  </button>
+</nav>
+
+<main class="container">
+
+  <!-- ══ Tab 1: Sample Browser ══ -->
+  <section id="tab-sample" class="tab-panel active">
+    <div class="two-col">
+
+      <!-- Left: Input -->
+      <div class="panel">
+        <h2>📥 Input</h2>
+
+        <div class="sample-select">
+          <label>Select nuScenes Sample</label>
+          <select id="sample-select">
+            <option>Loading samples...</option>
+          </select>
+          <button
+            id="btn-predict"
+            class="btn primary"
+            onclick="predictSample()"
+          >
+            🔍 Predict BEV
+          </button>
+        </div>
+
+        <div class="cam-label">6 Camera Inputs</div>
+        <div class="cam-grid" id="cam-grid">
+          <div class="cam-placeholder">
+            Select a sample to view cameras
+          </div>
+        </div>
+      </div>
+
+      <!-- Right: Output -->
+      <div class="panel">
+        <h2>🗺️ BEV Prediction</h2>
+
+        <div class="bev-tabs">
+          <button
+            class="bev-tab active"
+            onclick="showBEV('pred', this)"
+          >
+            Predicted
+          </button>
+          <button
+            class="bev-tab"
+            onclick="showBEV('gt', this)"
+          >
+            Ground Truth
+          </button>
+          <button
+            class="bev-tab"
+            onclick="showBEV('error', this)"
+          >
+            Error Map
+          </button>
+        </div>
+
+        <div class="bev-display" id="bev-display">
+          <div class="bev-placeholder">
+            Run prediction to see BEV map
+          </div>
+        </div>
+
+        <div class="slider-row">
+          <label>
+            Threshold:
+            <span id="thresh-val">0.5</span>
+          </label>
+          <input
+            type="range"
+            id="threshold"
+            min="0.1" max="0.9"
+            step="0.05" value="0.5"
+            oninput="updateThreshold(this.value)"
+          />
+        </div>
+      </div>
+    </div>
+
+    <!-- Metrics -->
+    <div class="metrics-row" id="metrics-row">
+
+      <div class="metric-card">
+        <div class="metric-icon">📊</div>
+        <div class="metric-label">Occupancy IoU</div>
+        <div class="metric-value" id="m-iou">—</div>
+        <div class="metric-bar">
+          <div class="metric-fill iou" id="bar-iou"
+               style="width:0%"></div>
+        </div>
+        <div class="metric-hint">↑ higher is better</div>
+      </div>
+
+      <div class="metric-card">
+        <div class="metric-icon">📏</div>
+        <div class="metric-label">Distance-Weighted Error</div>
+        <div class="metric-value" id="m-dwe">—</div>
+        <div class="metric-bar">
+          <div class="metric-fill dwe" id="bar-dwe"
+               style="width:0%"></div>
+        </div>
+        <div class="metric-hint">↓ lower is better</div>
+      </div>
+
+      <div class="metric-card">
+        <div class="metric-icon">🟦</div>
+        <div class="metric-label">Occupancy</div>
+        <div class="metric-value" id="m-occ">—</div>
+        <canvas id="occ-chart"
+                width="100" height="100"
+                style="margin-top:8px">
+        </canvas>
+      </div>
+
+      <div class="metric-card">
+        <div class="metric-icon">⚡</div>
+        <div class="metric-label">Inference Time</div>
+        <div class="metric-value" id="m-time">—</div>
+        <div class="metric-hint">milliseconds</div>
+      </div>
+
+    </div>
+  </section>
+
+  <!-- ══ Tab 2: Video Upload ══ -->
+  <section id="tab-video" class="tab-panel">
+    <div class="panel">
+      <h2>🎥 Upload Driving Video</h2>
+      <p class="muted" style="margin-bottom:20px">
+        Upload a dashcam video — we extract frames and
+        predict BEV occupancy for each frame automatically.
+      </p>
+
+      <div
+        class="upload-area"
+        id="upload-area"
+        onclick="document.getElementById('video-input').click()"
+        ondragover="event.preventDefault()"
+        ondrop="handleDrop(event)"
+      >
+        <input
+          type="file"
+          id="video-input"
+          accept="video/*"
+          onchange="handleVideoUpload(this)"
+          style="display:none"
+        />
+        <div class="upload-icon">🎥</div>
+        <div style="font-size:15px;margin-bottom:6px">
+          Click or drag video here
+        </div>
+        <div class="muted small">
+          MP4, AVI, MOV — max 30 frames extracted
+        </div>
+      </div>
+
+      <div id="video-progress" style="display:none">
+        <div class="progress-bar">
+          <div class="progress-fill" id="progress-fill">
+          </div>
+        </div>
+        <div id="progress-text" class="muted small"
+             style="margin-top:6px">
+          Processing...
+        </div>
+      </div>
+
+      <!-- GIF output -->
+      <div id="gif-output" style="display:none;margin-top:20px">
+        <h3 style="margin-bottom:12px">
+          🎞️ Animated BEV Result
+        </h3>
+        <img id="gif-img" style="border-radius:12px;
+             max-width:100%" alt="BEV Animation"/>
+      </div>
+
+      <!-- Side by side frames -->
+      <div id="video-frames"
+           class="frames-grid"
+           style="margin-top:20px">
+      </div>
+    </div>
+  </section>
+
+  <!-- ══ Tab 3: About ══ -->
+  <section id="tab-about" class="tab-panel">
+    <div class="panel">
+      <h2>ℹ️ About this Project</h2>
+
+      <div class="about-grid">
+
+        <div class="about-card">
+          <h3>🎯 Problem Statement 3</h3>
+          <p>
+            Transform 6 camera images into a 2D
+            Bird's-Eye-View occupancy grid showing
+            obstacles and free space for Level 4
+            autonomous driving systems.
+          </p>
+        </div>
+
+        <div class="about-card">
+          <h3>🧠 Architecture</h3>
+          <p>
+            <strong>ResNet50 + FPN</strong> backbone
+            → <strong>LSS</strong> view transformer
+            → <strong>FastOcc 2D FCN</strong> decoder
+            → Occupancy head
+          </p>
+        </div>
+
+        <div class="about-card">
+          <h3>📊 Training Results</h3>
+          <p>
+            Occupancy IoU:
+            <strong style="color:#7c9aff">0.2081</strong>
+            <br/>
+            Epochs: 20 | Device: T4 GPU
+            <br/>
+            Dataset: nuScenes v1.0-mini
+          </p>
+        </div>
+
+        <div class="about-card">
+          <h3>📚 Research Papers</h3>
+          <p>
+            1. "Delving into the Devils of BEV Perception"
+            — IEEE TPAMI 2023
+            <br/><br/>
+            2. "FastOcc: Accelerating 3D Occupancy
+            Prediction" — ICRA 2024
+          </p>
+        </div>
+
+        <div class="about-card">
+          <h3>💻 GitHub Repository</h3>
+          <p>
+            
+              href="https://github.com/nirajj12/Bird-s-Eye-View-BEV-2D-Occupancy"
+              target="_blank"
+              style="color:#7c9aff"
+            >
+              nirajj12/Bird-s-Eye-View-BEV-2D-Occupancy
+            </a>
+            <br/><br/>
+            Working code + model + results
+          </p>
+        </div>
+
+        <div class="about-card">
+          <h3>🔑 Key Metrics</h3>
+          <p>
+            <strong>Occupancy IoU</strong> — how well
+            predicted BEV matches LiDAR ground truth
+            <br/><br/>
+            <strong>Distance-Weighted Error</strong> —
+            errors near ego vehicle penalized more
+          </p>
+        </div>
+
+      </div>
+    </div>
+  </section>
+
+</main>
+
+<!-- Footer -->
+<footer class="app-footer">
+  <div>MAHE Mobility Hackathon 2026 — Track 01, PS3</div>
+  <div class="tiny">
+    BEV 2D Occupancy | nuScenes CC BY-NC-SA 4.0
+  </div>
+</footer>
+
+<script src="/static/js/script.js"></script>
+</body>
+</html>

@@ -1,0 +1,47 @@
+# ══════════════════════════════════════════════
+# BEV 2D Occupancy Project — Requirements
+# Python 3.11 | Mac (MPS) + Windows (CUDA)
+# ══════════════════════════════════════════════
+
+# ── PyTorch ────────────────────────────────────
+# Mac:
+#   pip install torch torchvision torchaudio
+#
+# Windows CUDA 11.8:
+#   pip install torch torchvision torchaudio
+#   --index-url https://download.pytorch.org/whl/cu118
+#
+# Windows CUDA 12.1:
+#   pip install torch torchvision torchaudio
+#   --index-url https://download.pytorch.org/whl/cu121
+# ───────────────────────────────────────────────
+torch>=2.1.0
+torchvision>=0.16.0
+torchaudio>=2.1.0
+
+# ── nuScenes Dataset ───────────────────────────
+nuscenes-devkit>=1.1.11
+pyquaternion>=0.9.9
+
+# ── Scientific Stack ───────────────────────────
+numpy>=1.26.0
+scipy>=1.11.0
+
+# ── Computer Vision ────────────────────────────
+opencv-python>=4.8.0
+Pillow>=10.0.0
+
+# ── Visualization ──────────────────────────────
+matplotlib>=3.8.0
+
+# ── Model Building ─────────────────────────────
+einops>=0.7.0
+timm>=0.9.12
+
+# ── Training Utilities ─────────────────────────
+tqdm>=4.66.0
+tensorboard>=2.15.0
+
+# ── Data Handling ──────────────────────────────
+pandas>=2.1.0
+pyyaml>=6.0.1
