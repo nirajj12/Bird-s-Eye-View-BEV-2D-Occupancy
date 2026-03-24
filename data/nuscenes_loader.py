@@ -4,11 +4,14 @@
 # Uses preprocess.py functions for all transformations
 # ══════════════════════════════════════════════════════
 
+
 import os
+import numpy as np
 import torch
 from torch.utils.data import Dataset, DataLoader, random_split
 from nuscenes.nuscenes import NuScenes
 from nuscenes.utils.data_classes import LidarPointCloud
+
 
 from config.config import (
     DATAROOT, VERSION,
@@ -25,7 +28,9 @@ from data.preprocess import (
 from logger.custom_logger import CustomLogger
 from exception.custom_exception import BEVException
 
+
 logger = CustomLogger().get_logger(__name__)
+
 
 
 class BEVOccupancyDataset(Dataset):
@@ -45,10 +50,9 @@ class BEVOccupancyDataset(Dataset):
     """
 
     def __init__(self,
-                 dataroot: str  = DATAROOT,
-                 version:  str  = VERSION):
+                 dataroot: str = DATAROOT,
+                 version:  str = VERSION):
         try:
-            # ── Load nuScenes ───────────────────────────
             self.nusc = NuScenes(
                 version  = version,
                 dataroot = dataroot,
@@ -67,37 +71,31 @@ class BEVOccupancyDataset(Dataset):
                 "Failed to initialize BEVOccupancyDataset", e
             ) from e
 
+
     def __len__(self) -> int:
         return len(self.samples)
 
+
     def __getitem__(self, idx: int) -> dict:
-        """
-        Returns one fully preprocessed sample.
-        Called automatically by DataLoader.
-        """
         try:
-            sample = self.samples[idx]
+            sample     = self.samples[idx]
+            imgs       = []
+            intrinsics = []
+            extrinsics = []
 
-            imgs        = []
-            intrinsics  = []
-            extrinsics  = []
-
-            # ── Process all 6 cameras ───────────────────
             for cam_name in CAM_NAMES:
                 img, K, E = self._load_camera(sample, cam_name)
                 imgs.append(img)
                 intrinsics.append(K)
                 extrinsics.append(E)
 
-            # ── Build BEV ground truth from LiDAR ───────
             occ_gt = self._load_lidar_bev(sample)
 
             return {
-                # Stack 6 cameras along dim 0
-                'imgs'       : torch.stack(imgs),        # (6,3,H,W)
-                'intrinsics' : torch.stack(intrinsics),  # (6,3,3)
-                'extrinsics' : torch.stack(extrinsics),  # (6,4,4)
-                'occ_gt'     : occ_gt                    # (200,200)
+                'imgs'      : torch.stack(imgs),        # (6,3,H,W)
+                'intrinsics': torch.stack(intrinsics),  # (6,3,3)
+                'extrinsics': torch.stack(extrinsics),  # (6,4,4)
+                'occ_gt'    : occ_gt                    # (200,200)
             }
 
         except Exception as e:
@@ -105,78 +103,100 @@ class BEVOccupancyDataset(Dataset):
                 f"Failed to load sample at index {idx}", e
             ) from e
 
+
     # ──────────────────────────────────────────────────
     # Private helpers
     # ──────────────────────────────────────────────────
 
     def _load_camera(self, sample: dict, cam_name: str):
-        """
-        Load and preprocess one camera's image + calibration.
-
-        Returns:
-            img : tensor (3, IMG_H, IMG_W)
-            K   : tensor (3, 3)
-            E   : tensor (4, 4)
-        """
-        # Get camera data from nuScenes
-        cam_token  = sample['data'][cam_name]
-        cam_data   = self.nusc.get('sample_data', cam_token)
-        calib      = self.nusc.get(
+        cam_token = sample['data'][cam_name]
+        cam_data  = self.nusc.get('sample_data', cam_token)
+        calib     = self.nusc.get(
             'calibrated_sensor',
             cam_data['calibrated_sensor_token']
         )
 
-        # Full path to image file
-        img_path = os.path.join(
-            self.nusc.dataroot,
-            cam_data['filename']
-        )
+        img_path = os.path.join(self.nusc.dataroot, cam_data['filename'])
 
-        # Preprocess using functions from preprocess.py
         img = preprocess_image(img_path)
-
         K   = preprocess_intrinsic(
-            calib['camera_intrinsic'],
-            orig_w = cam_data['width'],
-            orig_h = cam_data['height']
-        )
-
+                  calib['camera_intrinsic'],
+                  orig_w=cam_data['width'],
+                  orig_h=cam_data['height']
+              )
         E   = preprocess_extrinsic(
-            calib['rotation'],
-            calib['translation']
-        )
+                  calib['rotation'],
+                  calib['translation']
+              )
 
         return img, K, E
 
+
     def _load_lidar_bev(self, sample: dict) -> torch.Tensor:
         """
-        Load LiDAR scan and convert to 2D BEV occupancy grid.
+        Manual 5-sweep aggregation in sensor frame.
 
-        Returns:
-            occ: tensor (BEV_H, BEV_W) — float32, 0 or 1
+        WHY MANUAL: nuscenes-devkit 1.1.11 has a bug where
+        from_file_multisweep silently returns 1 sweep when
+        the prev chain token is broken in mini metadata.
+
+        APPROACH: Walk the prev chain ourselves, load each
+        sweep as raw points in sensor frame, concatenate all,
+        then pass the merged cloud to build_bev_occupancy
+        which handles sensor→ego transform internally.
+
+        NOTE: Points from previous sweeps are kept in their
+        own sensor frame (no motion compensation). At 20Hz
+        LiDAR over 5 sweeps (~0.2s), a car at 50km/h moves
+        ~2.8m = ~5 BEV cells. This slight motion blur is
+        acceptable for occupancy GT and is standard practice
+        in BEV papers.
         """
         lidar_token = sample['data']['LIDAR_TOP']
-        lidar_data  = self.nusc.get('sample_data', lidar_token)
-        lidar_calib = self.nusc.get(
+        ref_data    = self.nusc.get('sample_data', lidar_token)
+        ref_calib   = self.nusc.get(
             'calibrated_sensor',
-            lidar_data['calibrated_sensor_token']
+            ref_data['calibrated_sensor_token']
         )
 
-        # Load point cloud
-        pc, _ = LidarPointCloud.from_file_multisweep(
-            self.nusc, sample,
-            chan='LIDAR_TOP', ref_chan='LIDAR_TOP',
-            nsweeps=5
+        all_points = []   # each entry: (4, N) array
+        current    = ref_data
+        N_SWEEPS   = 5
+
+        for sweep_idx in range(N_SWEEPS):
+            pc_path = os.path.join(
+                self.nusc.dataroot,
+                current['filename']
+            )
+            pc = LidarPointCloud.from_file(pc_path)
+            all_points.append(pc.points.copy())   # (4, N) x,y,z,intensity
+
+            # Walk to previous sweep — stop if chain ends
+            if current['prev'] == '':
+                logger.info(
+                    f"Sweep chain ended at sweep {sweep_idx + 1}"
+                )
+                break
+            current = self.nusc.get('sample_data', current['prev'])
+
+        # Concatenate all sweeps → (4, N_total)
+        merged = np.concatenate(all_points, axis=1)
+
+        logger.info(
+            f"Multi-sweep loaded | "
+            f"sweeps: {len(all_points)} | "
+            f"total points: {merged.shape[1]:,}"
         )
 
-        # Build BEV occupancy grid
+        # build_bev_occupancy handles sensor→ego transform
         occ = build_bev_occupancy(
-            lidar_points      = pc.points,
-            lidar_rotation    = lidar_calib['rotation'],
-            lidar_translation = lidar_calib['translation']
+            lidar_points      = merged,
+            lidar_rotation    = ref_calib['rotation'],
+            lidar_translation = ref_calib['translation']
         )
 
         return occ
+
 
 
 # ──────────────────────────────────────────────────────
@@ -187,23 +207,12 @@ def get_dataloaders(
     dataroot: str = DATAROOT,
     version:  str = VERSION
 ):
-    """
-    Creates train and validation DataLoaders.
-
-    Returns:
-        train_loader: DataLoader
-        val_loader:   DataLoader
-        train_size:   int
-        val_size:     int
-    """
     try:
-        # Create full dataset
         full_dataset = BEVOccupancyDataset(
-            dataroot = dataroot,
-            version  = version
+            dataroot=dataroot,
+            version=version
         )
 
-        # Split into train / val
         total      = len(full_dataset)
         train_size = int(TRAIN_SPLIT * total)
         val_size   = total - train_size
@@ -211,10 +220,9 @@ def get_dataloaders(
         train_ds, val_ds = random_split(
             full_dataset,
             [train_size, val_size],
-            generator = torch.Generator().manual_seed(42)
+            generator=torch.Generator().manual_seed(42)
         )
 
-        # Create loaders
         train_loader = DataLoader(
             train_ds,
             batch_size  = BATCH_SIZE,
