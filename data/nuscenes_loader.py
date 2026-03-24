@@ -163,11 +163,11 @@ class BEVOccupancyDataset(Dataset):
         )
 
         # Load point cloud
-        pc_path = os.path.join(
-            self.nusc.dataroot,
-            lidar_data['filename']
+        pc, _ = LidarPointCloud.from_file_multisweep(
+            self.nusc, sample,
+            chan='LIDAR_TOP', ref_chan='LIDAR_TOP',
+            nsweeps=5
         )
-        pc = LidarPointCloud.from_file(pc_path)
 
         # Build BEV occupancy grid
         occ = build_bev_occupancy(

@@ -187,31 +187,31 @@ class OccupancyHead(nn.Module):
 # ──────────────────────────────────────────────────────
 
 def focal_loss(
-    pred_logits: torch.Tensor,  # (B, 1, H, W) — raw logits, NO sigmoid applied yet
-    gt:          torch.Tensor,  # (B, 1, H, W) — binary {0.0, 1.0}
+    pred_logits: torch.Tensor,
+    gt:          torch.Tensor,
     gamma:       float = 2.0,
-    alpha:       float = 0.75   # 0.75 = weight for POSITIVE class (occupied = minority ~5%)
+    alpha:       float = 0.75,
+    pos_weight:  torch.Tensor = None   # ← ADD THIS parameter only
 ) -> torch.Tensor:
     """
-    Focal Loss — handles class imbalance.
-    alpha=0.75 means occupied cells get 3× more weight than empty cells.
-    gamma=2.0 down-weights easy negatives (vast empty BEV space).
-
-    CORRECT alpha semantics:
-        alpha_t = 0.75 for gt=1 (occupied — minority, hard to learn)
-        alpha_t = 0.25 for gt=0 (empty   — majority, easy, down-weight)
+    Focal Loss with optional dynamic pos_weight.
+    pos_weight scales the base BCE before focal modulation.
     """
-    # Apply sigmoid HERE — once. Not in the head.
     pred = torch.sigmoid(pred_logits)
-    pred = pred.clamp(1e-6, 1.0 - 1e-6)  # numerical stability
+    pred = pred.clamp(1e-6, 1.0 - 1e-6)
 
-    # Per-cell alpha: 0.75 for positives, 0.25 for negatives
     alpha_t = alpha * gt + (1.0 - alpha) * (1.0 - gt)
 
-    # Standard cross-entropy then modulate with focal weight
-    bce   = -(gt * torch.log(pred) + (1.0 - gt) * torch.log(1.0 - pred))
-    pt    = torch.exp(-bce)                             # pt = 1 if easy, 0 if hard
-    focal = alpha_t * (1.0 - pt) ** gamma * bce        # hard examples get full weight
+    # ── CHANGE: use pos_weight if provided ─────────────────────────────────
+    if pos_weight is not None:
+        bce = -(pos_weight * gt * torch.log(pred)
+                + (1.0 - gt) * torch.log(1.0 - pred))
+    else:
+        bce = -(gt * torch.log(pred) + (1.0 - gt) * torch.log(1.0 - pred))
+    # ────────────────────────────────────────────────────────────────────────
+
+    pt    = torch.exp(-bce)
+    focal = alpha_t * (1.0 - pt) ** gamma * bce
 
     return focal.mean()
 
@@ -254,45 +254,44 @@ def aux_bce_loss(
 
 
 def total_occupancy_loss(
-    occ_logits:  torch.Tensor,           # (B, 1, H, W) main head raw logits
-    gt:          torch.Tensor,           # (B, 1, H, W) binary ground truth
-    aux_logits:  torch.Tensor = None,    # (B, 1, H, W) aux head raw logits
+    occ_logits:  torch.Tensor,
+    gt:          torch.Tensor,
+    aux_logits:  torch.Tensor = None,
     focal_w:     float = 1.0,
     dice_w:      float = 1.0,
     aux_w:       float = 0.5
 ) -> dict:
     """
-    Combined loss — FastOcc Eq 7:
-        Loss = Lf (focal) + Ldice + 0.5 * Lb (aux BCE)
+    Combined loss — FastOcc Eq 7 + dynamic pos_weight + smoothness.
+    Loss = Lf (focal) + Ldice + 0.5 * Lb (aux BCE) + smooth
 
-    All inputs are RAW LOGITS.
-    sigmoid is applied inside each sub-loss.
-
-    Args:
-        occ_logits:  main head output   (B, 1, 200, 200)
-        gt:          LiDAR occupancy GT (B, 1, 200, 200)
-        aux_logits:  aux head output    (B, 1, 200, 200) or None
-
-    Returns:
-        dict: {
-            'total':   scalar — backprop this
-            'focal':   scalar — for logging
-            'dice':    scalar — for logging
-            'aux_bce': scalar — for logging
-        }
+    CHANGE vs old: dynamic pos_weight passed to focal_loss
+                   smoothness regularizer added
     """
-    Lf   = focal_loss(occ_logits, gt) * focal_w
-    Ld   = dice_loss(occ_logits, gt)  * dice_w
+    # ── Dynamic pos_weight — adapts to GT density after multi-sweep ────────
+    n_pos = gt.sum().clamp(min=1.0)
+    n_neg = (1.0 - gt).sum().clamp(min=1.0)
+    pw    = (n_neg / n_pos).clamp(max=30.0).detach()   # caps at 30 for stability
 
-    Lb   = torch.tensor(0.0, device=occ_logits.device)
+    Lf  = focal_loss(occ_logits, gt, pos_weight=pw) * focal_w
+    Ld  = dice_loss(occ_logits, gt)                 * dice_w
+
+    # ── BEV Smoothness (reduces salt-pepper noise in BEV predictions) ───────
+    sx  = (occ_logits[:, :, :, 1:] - occ_logits[:, :, :, :-1]).abs().mean()
+    sy  = (occ_logits[:, :, 1:, :] - occ_logits[:, :, :-1, :]).abs().mean()
+    Ls  = 0.01 * (sx + sy)
+
+    Lb  = torch.tensor(0.0, device=occ_logits.device)
     if aux_logits is not None:
         Lb = aux_bce_loss(aux_logits, gt) * aux_w
 
-    total = Lf + Ld + Lb
+    total = Lf + Ld + Ls + Lb
 
     return {
         'total'  : total,
         'focal'  : Lf.detach(),
         'dice'   : Ld.detach(),
-        'aux_bce': Lb.detach() if isinstance(Lb, torch.Tensor) else Lb
+        'smooth' : Ls.detach(),
+        'aux_bce': Lb.detach() if isinstance(Lb, torch.Tensor) else Lb,
+        'pw'     : pw.item()   # log this — should be 5–15 after multi-sweep
     }

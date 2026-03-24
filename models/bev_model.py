@@ -181,12 +181,12 @@ class BEVOccupancyModel(nn.Module):
             ) from e
 
     def compute_loss(self,
-                     occ_logits: torch.Tensor,
-                     aux_logits: torch.Tensor,
-                     occ_gt:     torch.Tensor
-                     ) -> dict:
+                 occ_logits: torch.Tensor,
+                 aux_logits: torch.Tensor,
+                 occ_gt:     torch.Tensor
+                 ) -> dict:
         """
-        Compute combined loss (FastOcc Eq. 7).
+        Focal + Dice + Smoothness loss (replaces total_occupancy_loss).
 
         Args:
             occ_logits: (B, 1, 200, 200)  main head raw logits
@@ -194,26 +194,58 @@ class BEVOccupancyModel(nn.Module):
             occ_gt:     (B, 200, 200)     binary GT from LiDAR
 
         Returns:
-            dict: {
-                'total':   scalar ← call .backward() on this
-                'focal':   scalar ← log this
-                'dice':    scalar ← log this
-                'aux_bce': scalar ← log this
-            }
+            dict with 'total' (call .backward() on this),
+            'focal', 'dice', 'smooth', 'aux', 'pw' for logging
         """
         try:
-            gt = occ_gt.unsqueeze(1).float()
-            # (B, 200, 200) → (B, 1, 200, 200)
+            import torch.nn.functional as F
 
-            return total_occupancy_loss(
-                occ_logits = occ_logits,
-                gt         = gt,
-                aux_logits = aux_logits
-            )
+            gt = occ_gt.unsqueeze(1).float()   # (B, 1, 200, 200)
+
+            # ── Dynamic pos_weight ─────────────────────────────────────────
+            n_pos = gt.sum().clamp(min=1.0)
+            n_neg = (1.0 - gt).sum().clamp(min=1.0)
+            pw    = (n_neg / n_pos).clamp(max=30.0).detach()
+            pw_t  = torch.tensor([pw.item()], device=occ_logits.device)
+
+            # ── Focal Loss (main head) ─────────────────────────────────────
+            bce   = F.binary_cross_entropy_with_logits(
+                        occ_logits, gt,
+                        pos_weight=pw_t,
+                        reduction='none')
+            pt    = torch.exp(-bce)
+            focal = (0.75 * (1.0 - pt) ** 2.0 * bce).mean()
+
+            # ── Dice Loss (main head) ──────────────────────────────────────
+            prob  = torch.sigmoid(occ_logits)
+            inter = (prob * gt).sum()
+            dice  = 1.0 - (2.0 * inter + 1.0) / (prob.sum() + gt.sum() + 1.0)
+
+            # ── BEV Smoothness Regularizer ─────────────────────────────────
+            sx     = (occ_logits[:, :, :, 1:] - occ_logits[:, :, :, :-1]).abs().mean()
+            sy     = (occ_logits[:, :, 1:, :] - occ_logits[:, :, :-1, :]).abs().mean()
+            smooth = 0.01 * (sx + sy)
+
+            # ── Auxiliary Head Loss (simple BCE — keeps aux head alive) ────
+            aux_loss = F.binary_cross_entropy_with_logits(
+                        aux_logits, gt,
+                        pos_weight=pw_t)
+
+            # ── Combined ───────────────────────────────────────────────────
+            total = focal + 0.5 * dice + smooth + 0.3 * aux_loss
+
+            return {
+                'total':  total,
+                'focal':  focal.detach().item(),
+                'dice':   dice.detach().item(),
+                'smooth': smooth.detach().item(),
+                'aux':    aux_loss.detach().item(),
+                'pw':     pw.item()
+            }
 
         except Exception as e:
             raise BEVException("Loss computation failed", e) from e
-
+        
     @torch.no_grad()
     def predict(self,
                 imgs:       torch.Tensor,
