@@ -191,13 +191,21 @@ The app supports three modes:
 
 ### 6.1 Demo Preview
 
-> Add screenshots here after uploading assets.
+The FastAPI demo includes a cinematic BEV-style interface for scene selection, multi-camera input review, inference execution, and occupancy evaluation.
 
-```md
+#### UI Gallery
 
+**Landing screen**
 
+![BEV-NET landing screen](assets/readme/ui-landing.png)
 
-```
+**Dataset browser with six camera feeds**
+
+![BEV-NET dataset browser](assets/readme/ui-dataset-browser.png)
+
+**Occupancy results and live performance metrics**
+
+![BEV-NET results and metrics panel](assets/readme/ui-results-metrics.png)
 
 ### 6.2 Model Performance Summary
 
@@ -233,23 +241,27 @@ This shows that the V3 training schedule, DWE-aware losses, and architectural tw
 
 ### 6.4 Qualitative Outputs (Recommended)
 
-Add example images in an `assets/` folder and reference them like this:
+This section highlights how the six-camera input is transformed into a BEV occupancy map and how prediction quality varies across strong, average, and failure cases.
 
-```md
-#### Best / Worst / Random Validation Samples
+#### Image-to-BEV Pipeline Visualization
 
-| Type | Visualization |
-|------|---------------|
-| Best sample |  |
-| Worst sample |  |
-| Random sample |  |
+![Image-to-BEV transformation pipeline](assets/readme/viz1_pipeline_v3.png)
 
-#### Before vs After Training (Same Scene)
+#### Validation Showcase Summary
 
-| Ground Truth | V2 Prediction | V3 Prediction |
-|-------------|---------------|---------------|
-|  |  |  |
-```
+![Best, mid, and worst validation showcase](assets/readme/viz5_bev_showcase.png)
+
+#### Best Validation Sample
+
+![Best validation sample with ground truth, prediction, and confidence](assets/readme/best_1.png)
+
+#### Random Validation Sample
+
+![Random validation sample with ground truth, prediction, and confidence](assets/readme/random_1.png)
+
+#### Worst Validation Sample
+
+![Worst validation sample with ground truth, prediction, and confidence](assets/readme/worst_1.png)
 
 ---
 
