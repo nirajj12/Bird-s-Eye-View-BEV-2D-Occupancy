@@ -27,67 +27,86 @@ The system is built around a custom **BEVOccupancyModel** with four main compone
 
 ---
 
-## 2. Model Architecture
+## 2. Model Architecture — The Engineering Journey
 
-The model takes 6 camera images plus camera intrinsics and extrinsics as input and produces a BEV occupancy grid as output.
+This is not just a model. It is the result of three distinct attempts, each failing in a specific way that pointed to the next improvement. Here is exactly what we tried, what went wrong, and what we built instead.
 
-### Why Not Lift-Splat-Shoot?
+---
 
-Our first instinct was a **Lift-Splat-Shoot (LSS)** style pipeline — lift each pixel into 3D using predicted depth, splat features into BEV voxels. Simple, fast, well-understood.
+### Attempt 1 — LSS-Style Lift-Splat Transformer
 
-**Why it failed for our case:**
-- LSS requires a depth prediction module — another learned component that needs supervision not available in nuScenes mini
-- With only 404 samples, a depth network never converges properly
-- Uncertain depth estimates spread feature mass across voxels, producing blurry BEV maps
-- IoU was stuck around **0.15–0.20** because the geometry was fundamentally noisy
+Our first approach was a **Lift-Splat-Shoot (LSS)** style pipeline — lift each pixel into 3D using predicted depth, splat features into BEV voxels, then apply a transformer over the BEV grid.
 
-LSS works at scale. For a 404-sample dataset, it is the wrong tool.
+Simple, fast, and well-understood in the literature.
 
-### The Geometry Insight
+**What happened:**
+
+Training appeared to progress normally for the first few epochs — then **IoU plateaued at epoch 7 and never improved further**.
+
+**Why it failed:**
+
+- LSS requires a depth prediction module — another learned component needing supervision not available in nuScenes mini
+- With only 404 samples, a depth network never converges; it outputs near-uniform depth distributions
+- Uncertain depth spreads feature mass across voxels, producing blurry BEV representations
+- The transformer was learning on top of geometrically noisy, incorrect features
+- IoU was stuck around **0.15–0.20** regardless of training duration
+
+LSS works at scale with tens of thousands of samples. For 404, it is the wrong tool.
+
+---
+
+### Attempt 2 — Geometry-Aware BEV Projection (BEVFormer-Style)
 
 > "Instead of predicting depth and then projecting, what if we use **known** camera geometry directly?"
 
-We know the intrinsic matrix **K** and extrinsic matrix **E** for every camera exactly. We do not need to *learn* where things are in 3D — we just need to sample features at geometrically correct places.
+We know the intrinsic matrix **K** and extrinsic matrix **E** for every camera exactly. There is no need to *learn* where things are in 3D — we just need to sample features at geometrically correct locations.
 
-| Old Approach (LSS) | Our Approach |
+**The shift in thinking:**
+
+| LSS Approach | Geometry-Aware Projection |
 |---|---|
-| Image → predict depth → lift to 3D → splat to BEV | Known geometry → define BEV grid points → project back to image → sample features |
+| Image → predict depth → lift to 3D → splat to BEV | Known K, E → define BEV grid points → project back to image → sample features |
 
 For every BEV cell at position `(x, y, z)` in ego coordinates:
 ```
 F_BEV(x,y,z) = sample(F_2D, project(P_ego → camera → image))
 ```
-We ask: *"For this BEV cell, which pixel in which camera should I look at?"* — and we know the **exact answer** from K and E. No learned depth. No additional supervision. The model only needs to learn *what features look like*, not *where things are*.
 
-### The Spatial Problem — Why V2 Was Not Enough
+We ask: *"For this BEV cell, which pixel in which camera should I look at?"* — and we know the **exact answer** from K and E. No learned depth. No additional supervision needed.
 
-After geometry-aware projection, we reached **IoU 0.30** but **DWE 0.23**. The model was making too many errors near the ego vehicle — the most safety-critical zone.
+**Result:** IoU jumped to **0.30**, training was stable, no plateau.
 
-**What is DWE?**
+**But a new problem emerged.** DWE was **0.23** — the model was making too many errors near the ego vehicle, the most safety-critical zone.
+
+---
+
+### Attempt 3 — Spatial Geometry + DWE-Aware Training
+
+**What is DWE and why does it matter?**
 > DWE weights errors by `1/distance` from ego. A false positive 2 metres away hurts **10× more** than one 20 metres away. A ghost obstacle near you causes an emergency brake; one far away barely matters.
 
-Three diagnosed problems:
+We diagnosed three specific problems in the geometry-aware projection model:
 
 | Problem | Root Cause |
 |---|---|
 | Blurry near-ego predictions | Sampling only at `Z=0` missed bumper and roof-height features |
-| Loss / metric mismatch | Training minimised uniform error; eval penalised near-ego errors heavily |
-| Soft probabilities near ego | Model outputting `0.6–0.7` instead of sharp `0.05` or `0.95` |
+| Loss / metric mismatch | Training minimised uniform error; evaluation penalised near-ego errors heavily |
+| Soft probabilities near ego | Model outputting `0.6–0.7` instead of decisive `0.05` or `0.95` |
 
-### Our Solutions (V3)
+**Our solutions — each maps directly to a diagnosed problem:**
 
-**Solution 1 — Multi-Height Z Sampling**
+**Solution 1 — Multi-Height Spatial Geometry Sampling**
 ```python
 Z_HEIGHTS = [0.0, 0.5, 1.5]  # ground plane, bumper height, roof height
 ```
-A car is not just on the ground. We sample BEV features at three heights and mean-pool them — capturing the full vertical extent of objects.
+A car is not just on the ground. We sample at three heights and mean-pool — capturing the full vertical extent of objects in the scene.
 
 **Solution 2 — DWE-Aligned Loss Function**
 ```python
 L_dwe = (dwe_map * abs(prob - GT)).mean()
 # dwe_map = 1/dist — mathematically identical to the evaluation metric
 ```
-We made the training loss identical to the evaluation metric. The model now explicitly optimises what it is being judged on.
+We made the training loss **mathematically identical** to the evaluation metric. The model now explicitly optimises what it is being judged on.
 
 **Solution 3 — Phased Training Curriculum**
 ```
@@ -97,17 +116,21 @@ Epochs 41–60:  Phase 2  → amplified DWE weights     (refine near-ego accurac
 ```
 Adding all losses from epoch 1 caused collapse. The curriculum gives the model a stable foundation before applying spatial pressure.
 
-### Components
+**Result:** IoU **0.3649**, DWE **0.1137** — 21% IoU gain and 51% DWE reduction over the geometry projection baseline.
+
+---
+
+### Final Architecture Components
 
 - **ImageBackbone** — Shared CNN backbone applied to each of the 6 camera views
-- **BEVFormerLite V3.1** — Geometry-aware view transformer, samples at Z = [0.0, 0.5, 1.5]
-- **BEVDecoder** — 2D BEV refinement network that upsamples and smooths the BEV feature map
+- **BEVFormerLite** — Geometry-aware view transformer, samples at Z = [0.0, 0.5, 1.5]
+- **BEVDecoder** — 2D BEV refinement that upsamples and smooths the BEV feature map
 - **OccupancyHead** — Produces main occupancy logits and auxiliary logits
 
 ### Inputs and Outputs
 
 - **Inputs**: Images `B×6×3×H×W` · Intrinsics `B×6×3×3` · Extrinsics `B×6×4×4`
-- **Outputs**: Main occupancy logits `B×1×200×200` · Auxiliary logits `B×1×200×200` · Binary BEV map
+- **Outputs**: Main logits `B×1×200×200` · Auxiliary logits `B×1×200×200` · Binary BEV map
 
 ### System Overview Diagram
 
@@ -117,7 +140,7 @@ Adding all losses from epoch 1 caused collapse. The curriculum gives the model a
 flowchart TB
     A[6 Camera Inputs] --> B[Preprocessing]
     B --> C[ImageBackbone]
-    C --> D[BEVFormerLite V3.1]
+    C --> D[BEVFormerLite]
     D --> E[BEVDecoder]
     E --> F[OccupancyHead]
     F --> G[Occupancy Logits]
@@ -145,7 +168,7 @@ flowchart LR
 This project uses the **nuScenes mini** dataset for training and evaluation.
 
 📂 **nuScenes mini used in this project**:  
-https://drive.google.com/drive/folders/1g5KgxG0p8-MmTiXkNtCpoYSIkdBQprEm
+[https://drive.google.com/drive/folders/1g5KgxG0p8-MmTiXkNtCpoYSIkdBQprEm](https://drive.google.com/drive/folders/1g5KgxG0p8-MmTiXkNtCpoYSIkdBQprEm)
 
 | Split | Samples |
 |---|---|
@@ -244,17 +267,17 @@ The FastAPI demo includes a cinematic BEV-style interface for scene selection, m
 
 ### 6.2 Results as a Story
 
-> **IoU went from 0.30 → 0.36 (+21%). But the more important number is DWE: 0.23 → 0.11, a 51% reduction. The model got dramatically better at the thing that matters most for safety — predicting correctly near the vehicle.**
+> **IoU improved across each iteration: LSS (~0.17, plateau ep.7) → Geometry Projection (0.30) → Spatial Geometry + DWE Loss (0.36, +21%). The most critical improvement was DWE dropping from 0.23 to 0.11 — a 51% reduction in safety-critical near-ego error.**
 
-| | V2 Baseline | V3 Ours | Improvement |
+| | LSS Transformer | Geometry Projection | Spatial Geometry + DWE Loss (Ours) |
 |---|---:|---:|---:|
-| **Overall IoU** | 0.3011 | **0.3649** | **+21.2%** |
-| **DWE** | 0.2323 | **0.1137** | **−51.1%** |
-| **Precision** | 0.4369 | **0.4520** | +1.5pp |
-| **Recall** | 0.5218 | **0.6110** | +8.9pp |
-| **F1 Score** | 0.4734 | **0.5146** | +4.1pp |
-| **Near-ego IoU** | — | **0.6278** | safety-critical zone |
-| **Far-field IoU** | — | **0.3150** | still room to grow |
+| **Overall IoU** | ~0.17 *(plateau ep.7)* | 0.3011 | **0.3649** |
+| **DWE** | — | 0.2323 | **0.1137** |
+| **Precision** | — | 0.4369 | **0.4520** |
+| **Recall** | — | 0.5218 | **0.6110** |
+| **F1 Score** | — | 0.4734 | **0.5146** |
+| **Near-ego IoU** | — | — | **0.6278** |
+| **Far-field IoU** | — | — | **0.3150** |
 
 > **What DWE = 0.11 means**: Our average spatially-weighted prediction error is 11% — with errors near the vehicle penalised up to 100× more than distant ones.
 
@@ -368,7 +391,7 @@ The FastAPI demo includes a cinematic BEV-style interface for scene selection, m
 | Deep Learning | PyTorch |
 | Dataset | nuScenes mini |
 | Geometry | Camera intrinsics, extrinsics, BEV projection |
-| Model Stack | ImageBackbone, BEVFormerLite V3.1, BEVDecoder, OccupancyHead |
+| Model Stack | ImageBackbone, BEVFormerLite, BEVDecoder, OccupancyHead |
 | Backend | FastAPI |
 | Frontend | HTML, CSS, JavaScript |
 | Visualization | Matplotlib, custom canvas rendering |
