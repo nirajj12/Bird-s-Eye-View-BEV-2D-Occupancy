@@ -11,7 +11,7 @@
 📊 **Dataset Used**: **nuScenes mini**  
 🧠 **Core Goal**: Predict a 2D Bird's-Eye View occupancy map from 6 surround-view cameras  
 🎯 **Best Validation IoU**: **0.3649**  
-📉 **Corrected DWE**: **0.1137**
+📉 **DWE**: **0.1137**
 
 ---
 
@@ -19,7 +19,7 @@
 
 BEV-NET is an end-to-end autonomous-driving perception project that converts six surround-view RGB images into a top-down occupancy map. It combines multi-camera feature extraction, geometry-aware BEV projection, BEV decoding, occupancy prediction, evaluation metrics, and an interactive FastAPI demo interface.
 
-The system is built around a custom **BEVOccupancyModel** with four main components: **ImageBackbone**, **BEVFormerLite **, **BEVDecoder**, and **OccupancyHead**. It outputs a `200 x 200` BEV occupancy grid and supports both dataset-based inference and fixed-calibration custom uploads.
+The system is built around a custom **BEVOccupancyModel** with four main components: **ImageBackbone**, **BEVFormerLite**, **BEVDecoder**, and **OccupancyHead**. It outputs a `200 x 200` BEV occupancy grid and supports both dataset-based inference and fixed-calibration custom uploads.
 
 ---
 
@@ -146,15 +146,15 @@ The model is trained using a phased strategy.
 
 **Phases**
 
-- **Warmup (Epochs 1–5)**  
+- **Warmup**  
   - Losses: focal + dice + auxiliary BCE  
 
-- **Phase 1 (Epochs 6–40)**  
+- **Phase 1**  
   - Adds Distance Weighted Error (DWE)  
   - Adds confidence regularization  
   - Adds total variation (TV) regularization  
 
-- **Phase 2 (Epochs 41–60)**  
+- **Phase 2**  
   - Increases DWE weight  
   - Focuses on reducing spatially critical errors  
 
@@ -293,16 +293,47 @@ This section highlights how the six-camera input is transformed into a BEV occup
 
 ```bash
 .
+├── app/
+│   └── main.py
+├── assets/
+│   └── readme/
+├── checkpoints/
+├── config/
+│   └── config.py
 ├── data/
+│   ├── nuscenes_loader.py
+│   └── preprocess.py
+├── dataset/
+│   └── nuscenes_data/
+├── exception/
+│   └── custom_exception.py
+├── logger/
+│   └── custom_logger.py
+├── logs/
 ├── models/
+│   ├── backbone.py
+│   ├── bev_decoder.py
+│   ├── bev_former_lite.py
+│   └── bev_model.py
+├── notebooks/
+├── results/
+├── sanity_output/
 ├── scripts/
-├── utils/
+│   ├── extracted_fixed_calib.py
+│   ├── find_featured_samples.py
+│   └── sanity_check_geometry.py
 ├── static/
+│   ├── css/
+│   └── js/
 ├── templates/
-├── notebook/
-├── artifacts/
-├── main.py
+│   └── index.html
+├── utils/
+│   ├── metrics.py
+│   └── visualize.py
+├── fixed_E.npy
+├── fixed_K.npy
 ├── requirements.txt
+├── train.py
 └── README.md
 ```
 
@@ -349,8 +380,10 @@ This section highlights how the six-camera input is transformed into a BEV occup
 
 **Niraj Kumar – AIML Engineer**  
 GitHub: https://github.com/nirajj12  
+Linkedin:https://www.linkedin.com/in/niraj-kumar-8255111b8/
 
 **Aditya Kumar**  
-GitHub: https://github.com/adityaxkr  
+GitHub: https://github.com/adityaxkr 
+Linkedin:https://www.linkedin.com/in/adityaxkr/ 
 
 ⭐ If you found this project useful, consider starring the repository!
