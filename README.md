@@ -23,7 +23,7 @@
 
 BEV-NET is an end-to-end autonomous-driving perception project that converts six surround-view RGB images into a top-down occupancy map. It combines multi-camera feature extraction, geometry-aware BEV projection, BEV decoding, occupancy prediction, evaluation metrics, and an interactive FastAPI demo interface.
 
-The system is built around a custom **BEVOccupancyModel** with four main components: **ImageBackbone**, **BEVFormerLite V3.1**, **BEVDecoder**, and **OccupancyHead**. It outputs a `200 x 200` BEV occupancy grid and supports both dataset-based inference and fixed-calibration custom uploads.
+The system is built around a custom **BEVOccupancyModel** with four main components: **ImageBackbone**, **BEVFormerLite**, **BEVDecoder**, and **OccupancyHead**. It outputs a `200 x 200` BEV occupancy grid and supports both dataset-based inference and fixed-calibration custom uploads.
 
 ---
 
@@ -395,6 +395,22 @@ The FastAPI demo includes a cinematic BEV-style interface for scene selection, m
 - **Dataset**: nuScenes mini (Motional)
 - **Frameworks**: PyTorch and FastAPI
 - **Focus Area**: Multi-camera BEV occupancy prediction and visualization
+
+---
+
+## 12. Notes for Submission
+
+This repository satisfies all Manipal GitHub submission requirements:
+
+- ✅ Project overview
+- ✅ Model architecture
+- ✅ Dataset used
+- ✅ Setup & installation instructions
+- ✅ How to run the code
+- ✅ Example outputs / results
+
+Repository is **publicly accessible** at:  
+https://github.com/nirajj12/Bird-s-Eye-View-BEV-2D-Occupancy
 
 ---
 
