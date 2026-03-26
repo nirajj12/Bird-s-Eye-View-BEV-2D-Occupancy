@@ -4,14 +4,18 @@
 ![PyTorch](https://img.shields.io/badge/PyTorch-Deep%20Learning-ee4c2c?style=for-the-badge&logo=pytorch)
 ![FastAPI](https://img.shields.io/badge/FastAPI-Backend-009688?style=for-the-badge&logo=fastapi)
 ![nuScenes](https://img.shields.io/badge/Dataset-nuScenes%20mini-6c63ff?style=for-the-badge)
+![Hackathon](https://img.shields.io/badge/MAHE%20Mobility%20Challenge-2026-orange?style=for-the-badge)
 ![Status](https://img.shields.io/badge/Status-Project%20Ready-success?style=for-the-badge)
 
+> **"We take six cameras from a self-driving car and predict, in real time, which parts of the ground around the vehicle are occupied — with a custom loss function that makes the model prioritise accuracy exactly where it matters most for safety."**
+
 📍 **Project Type**: End-to-end BEV occupancy prediction system  
-🔗 **GitHub Repository**: https://github.com/nirajj12/Bird-s-Eye-View-BEV-2D-Occupancy  
+🔗 **GitHub Repository**: [https://github.com/nirajj12/Bird-s-Eye-View-BEV-2D-Occupancy](https://github.com/nirajj12/Bird-s-Eye-View-BEV-2D-Occupancy)  
 📊 **Dataset Used**: **nuScenes mini**  
 🧠 **Core Goal**: Predict a 2D Bird's-Eye View occupancy map from 6 surround-view cameras  
 🎯 **Best Validation IoU**: **0.3649**  
-📉 **DWE**: **0.1137**
+📉 **DWE**: **0.1137** (51% better than baseline)  
+🏁 **Built for**: MAHE Mobility Challenge – Centre of Excellence in Autonomous Mobility, MIT Bengaluru
 
 ---
 
@@ -19,7 +23,7 @@
 
 BEV-NET is an end-to-end autonomous-driving perception project that converts six surround-view RGB images into a top-down occupancy map. It combines multi-camera feature extraction, geometry-aware BEV projection, BEV decoding, occupancy prediction, evaluation metrics, and an interactive FastAPI demo interface.
 
-The system is built around a custom **BEVOccupancyModel** with four main components: **ImageBackbone**, **BEVFormerLite**, **BEVDecoder**, and **OccupancyHead**. It outputs a `200 x 200` BEV occupancy grid and supports both dataset-based inference and fixed-calibration custom uploads.
+The system is built around a custom **BEVOccupancyModel** with four main components: **ImageBackbone**, **BEVFormerLite V3.1**, **BEVDecoder**, and **OccupancyHead**. It outputs a `200 x 200` BEV occupancy grid and supports both dataset-based inference and fixed-calibration custom uploads.
 
 ---
 
@@ -27,41 +31,93 @@ The system is built around a custom **BEVOccupancyModel** with four main compone
 
 The model takes 6 camera images plus camera intrinsics and extrinsics as input and produces a BEV occupancy grid as output.
 
+### Why Not Lift-Splat-Shoot?
+
+Our first instinct was a **Lift-Splat-Shoot (LSS)** style pipeline — lift each pixel into 3D using predicted depth, splat features into BEV voxels. Simple, fast, well-understood.
+
+**Why it failed for our case:**
+- LSS requires a depth prediction module — another learned component that needs supervision not available in nuScenes mini
+- With only 404 samples, a depth network never converges properly
+- Uncertain depth estimates spread feature mass across voxels, producing blurry BEV maps
+- IoU was stuck around **0.15–0.20** because the geometry was fundamentally noisy
+
+LSS works at scale. For a 404-sample dataset, it is the wrong tool.
+
+### The Geometry Insight
+
+> "Instead of predicting depth and then projecting, what if we use **known** camera geometry directly?"
+
+We know the intrinsic matrix **K** and extrinsic matrix **E** for every camera exactly. We do not need to *learn* where things are in 3D — we just need to sample features at geometrically correct places.
+
+| Old Approach (LSS) | Our Approach |
+|---|---|
+| Image → predict depth → lift to 3D → splat to BEV | Known geometry → define BEV grid points → project back to image → sample features |
+
+For every BEV cell at position `(x, y, z)` in ego coordinates:
+```
+F_BEV(x,y,z) = sample(F_2D, project(P_ego → camera → image))
+```
+We ask: *"For this BEV cell, which pixel in which camera should I look at?"* — and we know the **exact answer** from K and E. No learned depth. No additional supervision. The model only needs to learn *what features look like*, not *where things are*.
+
+### The Spatial Problem — Why V2 Was Not Enough
+
+After geometry-aware projection, we reached **IoU 0.30** but **DWE 0.23**. The model was making too many errors near the ego vehicle — the most safety-critical zone.
+
+**What is DWE?**
+> DWE weights errors by `1/distance` from ego. A false positive 2 metres away hurts **10× more** than one 20 metres away. A ghost obstacle near you causes an emergency brake; one far away barely matters.
+
+Three diagnosed problems:
+
+| Problem | Root Cause |
+|---|---|
+| Blurry near-ego predictions | Sampling only at `Z=0` missed bumper and roof-height features |
+| Loss / metric mismatch | Training minimised uniform error; eval penalised near-ego errors heavily |
+| Soft probabilities near ego | Model outputting `0.6–0.7` instead of sharp `0.05` or `0.95` |
+
+### Our Solutions (V3)
+
+**Solution 1 — Multi-Height Z Sampling**
+```python
+Z_HEIGHTS = [0.0, 0.5, 1.5]  # ground plane, bumper height, roof height
+```
+A car is not just on the ground. We sample BEV features at three heights and mean-pool them — capturing the full vertical extent of objects.
+
+**Solution 2 — DWE-Aligned Loss Function**
+```python
+L_dwe = (dwe_map * abs(prob - GT)).mean()
+# dwe_map = 1/dist — mathematically identical to the evaluation metric
+```
+We made the training loss identical to the evaluation metric. The model now explicitly optimises what it is being judged on.
+
+**Solution 3 — Phased Training Curriculum**
+```
+Epochs  1– 5:  Warmup   → focal + dice only        (learn basic occupancy shapes)
+Epochs  6–40:  Phase 1  → + DWE + confidence + TV  (learn spatial priority)
+Epochs 41–60:  Phase 2  → amplified DWE weights     (refine near-ego accuracy)
+```
+Adding all losses from epoch 1 caused collapse. The curriculum gives the model a stable foundation before applying spatial pressure.
+
 ### Components
 
-- **ImageBackbone**  
-  Shared CNN backbone applied to each of the 6 camera views.
-
-- **BEVFormerLite V3.1**  
-  Geometry-aware view transformer that samples features across multiple height levels and projects them into BEV coordinates.
-
-- **BEVDecoder**  
-  2D BEV refinement network that upsamples and smooths the BEV feature map.
-
-- **OccupancyHead**  
-  Final layer that outputs:
-  - Main occupancy logits: `B x 1 x 200 x 200`
-  - Auxiliary logits: `B x 1 x 200 x 200`
+- **ImageBackbone** — Shared CNN backbone applied to each of the 6 camera views
+- **BEVFormerLite V3.1** — Geometry-aware view transformer, samples at Z = [0.0, 0.5, 1.5]
+- **BEVDecoder** — 2D BEV refinement network that upsamples and smooths the BEV feature map
+- **OccupancyHead** — Produces main occupancy logits and auxiliary logits
 
 ### Inputs and Outputs
 
-- **Inputs**
-  - Images: `B x 6 x 3 x H x W`
-  - Intrinsics: `B x 6 x 3 x 3`
-  - Extrinsics: `B x 6 x 4 x 4`
-
-- **Outputs**
-  - Main occupancy logits: `B x 1 x 200 x 200`
-  - Auxiliary logits: `B x 1 x 200 x 200`
-  - Binary BEV map after sigmoid + thresholding
+- **Inputs**: Images `B×6×3×H×W` · Intrinsics `B×6×3×3` · Extrinsics `B×6×4×4`
+- **Outputs**: Main occupancy logits `B×1×200×200` · Auxiliary logits `B×1×200×200` · Binary BEV map
 
 ### System Overview Diagram
+
+![BEV-NET architecture diagram](assets/readme/bevnet-architecture-diagram.png)
 
 ```mermaid
 flowchart TB
     A[6 Camera Inputs] --> B[Preprocessing]
     B --> C[ImageBackbone]
-    C --> D[BEVFormerLite ]
+    C --> D[BEVFormerLite V3.1]
     D --> E[BEVDecoder]
     E --> F[OccupancyHead]
     F --> G[Occupancy Logits]
@@ -79,30 +135,35 @@ flowchart LR
     D --> E[Best Checkpoint]
 ```
 
+**Code Modules**
+- `models/backbone.py` · `models/bev_former_lite.py` · `models/bev_decoder.py` · `models/bev_model.py`
+
 ---
 
 ## 3. Dataset Used
 
 This project uses the **nuScenes mini** dataset for training and evaluation.
 
-- **Total samples**: 404  
-- **Training samples**: 323  
-- **Validation samples**: 81  
+📂 **nuScenes mini used in this project**:  
+https://drive.google.com/drive/folders/1g5KgxG0p8-MmTiXkNtCpoYSIkdBQprEm
+
+| Split | Samples |
+|---|---|
+| Total | 404 |
+| Training | 323 |
+| Validation | 81 |
 
 Each sample provides:
-- 6 synchronized surround-view RGB camera images  
-- Camera intrinsics and extrinsics for each camera  
-- BEV occupancy ground-truth built from LiDAR-based occupancy mapping  
+- 6 synchronized surround-view RGB camera images
+- Camera intrinsics and extrinsics for each camera
+- BEV occupancy ground-truth built from LiDAR-based occupancy mapping
 
-The BEV grid is:
-- Resolution: `200 x 200`  
-- Cell size: `0.4 m` per cell  
+The BEV grid is `200 × 200` cells at `0.4 m/cell` → **80 m × 80 m** range around the ego vehicle.
 
 **Relevant Code**
-
-- `data/nuscenesloader.py` – dataset and dataloaders  
-- `data/preprocess.py` – image resizing/normalization and calibration preprocessing  
-- `scripts/extract_fixed_calib.py`, `sanitycheckgeometry.py` – fixed calibration and geometry sanity checks  
+- `data/nuscenes_loader.py` – dataset and dataloaders
+- `data/preprocess.py` – image resizing/normalization and calibration preprocessing
+- `scripts/extracted_fixed_calib.py`, `scripts/sanity_check_geometry.py` – fixed calibration and geometry sanity checks
 
 ---
 
@@ -123,9 +184,9 @@ pip install -r requirements.txt
 
 ### 4.3 Prepare the Dataset
 
-1. Download the **nuScenes mini** dataset from the official source.  
-2. Place it in the dataset directory configured in your project (see `config/config.py`).  
-3. Adjust the dataset path in the config if needed.
+1. Download **nuScenes mini** from the Drive link above or from the official nuScenes website.
+2. Place it in the dataset directory configured in your project (see `config/config.py`).
+3. Adjust `cfg.DATAROOT` in the config if needed.
 
 ---
 
@@ -133,57 +194,33 @@ pip install -r requirements.txt
 
 ### 5.1 Training
 
-The model is trained using a phased strategy.
+```bash
+python train.py
+```
 
 **Training configuration**
 
-- Optimizer: **AdamW**  
-- Learning rate: `2e-4`  
-- Weight decay: `1e-4`  
-- Scheduler: **Cosine Annealing LR**  
-- Epochs: `60`  
-- Gradient clipping: **enabled**  
+| Parameter | Value |
+|---|---|
+| Optimizer | AdamW |
+| Learning rate | `2e-4` |
+| Weight decay | `1e-4` |
+| Scheduler | Cosine Annealing LR |
+| Epochs | 60 |
+| Gradient clipping | Enabled |
 
-**Phases**
-
-- **Warmup**  
-  - Losses: focal + dice + auxiliary BCE  
-
-- **Phase 1**  
-  - Adds Distance Weighted Error (DWE)  
-  - Adds confidence regularization  
-  - Adds total variation (TV) regularization  
-
-- **Phase 2**  
-  - Increases DWE weight  
-  - Focuses on reducing spatially critical errors  
-
-**Loss components**
-
-- Focal loss  
-- Dice loss  
-- Auxiliary BCE loss  
-- Distance Weighted Error (DWE)  
-- Confidence regularization  
-- TV regularization  
-
-> You can adapt the exact training command based on your training script (e.g., `python train.py`).
+**Loss components**: Focal · Dice · Auxiliary BCE · DWE · Confidence regularization · TV regularization
 
 ### 5.2 Running the FastAPI Demo
-
-Start the FastAPI app:
 
 ```bash
 uvicorn main:app --reload
 ```
 
-Then open the local URL printed in the terminal.
-
-The app supports three modes:
-
-- **Dataset browser**: select any validation sample  
-- **Featured scenes**: curated interesting scenarios (night, rain, construction, parking, etc.)  
-- **Custom upload**: upload 6 custom images with fixed nuScenes calibration  
+Three inference modes available:
+- **Dataset browser** — select any of the 81 validation samples
+- **Featured scenes** — curated interesting scenarios
+- **Custom upload** — upload your own 6 camera images (fixed nuScenes calibration applied)
 
 ---
 
@@ -192,8 +229,6 @@ The app supports three modes:
 ### 6.1 Demo Preview
 
 The FastAPI demo includes a cinematic BEV-style interface for scene selection, multi-camera input review, inference execution, and occupancy evaluation.
-
-#### UI Gallery
 
 **Landing screen**
 
@@ -207,41 +242,25 @@ The FastAPI demo includes a cinematic BEV-style interface for scene selection, m
 
 ![BEV-NET results and metrics panel](assets/readme/ui-results-metrics.png)
 
-### 6.2 Model Performance Summary
+### 6.2 Results as a Story
 
-| Metric | Value |
-|---|---:|
-| **Occupancy IoU** | **0.3649** |
-| **DWE** | **0.1137** |
-| **Precision** | **0.4520** |
-| **Recall** | **0.6110** |
-| **F1 Score** | **0.5146** |
-| **IoU Near Ego** | **0.6278** |
-| **IoU Far Field** | **0.3150** |
-| **IoU Improvement vs V2** | **+0.0638** |
-| **DWE Improvement vs V2** | **-0.1186** |
+> **IoU went from 0.30 → 0.36 (+21%). But the more important number is DWE: 0.23 → 0.11, a 51% reduction. The model got dramatically better at the thing that matters most for safety — predicting correctly near the vehicle.**
 
-Validation is performed on **81** samples with **per-sample** IoU and DWE computation for accurate tracking.
+| | V2 Baseline | V3 Ours | Improvement |
+|---|---:|---:|---:|
+| **Overall IoU** | 0.3011 | **0.3649** | **+21.2%** |
+| **DWE** | 0.2323 | **0.1137** | **−51.1%** |
+| **Precision** | 0.4369 | **0.4520** | +1.5pp |
+| **Recall** | 0.5218 | **0.6110** | +8.9pp |
+| **F1 Score** | 0.4734 | **0.5146** | +4.1pp |
+| **Near-ego IoU** | — | **0.6278** | safety-critical zone |
+| **Far-field IoU** | — | **0.3150** | still room to grow |
 
-### 6.3 Model Comparison: Baseline vs Latest
+> **What DWE = 0.11 means**: Our average spatially-weighted prediction error is 11% — with errors near the vehicle penalised up to 100× more than distant ones.
 
-To show clear progress, we report both the V2 baseline model and the final V3 model.
+> **Near-ego IoU = 0.63**: In the safety-critical zone within 12 metres, our model is correct nearly **two-thirds of the time**. That is the number an autonomous driving engineer actually cares about.
 
-| Model | IoU | DWE | Precision | Recall | F1 |
-|---|---:|---:|---:|---:|---:|
-| **V2 Baseline** | 0.3011 | 0.2323 | 0.4369 | 0.5218 | 0.4734 |
-| **V3 Final** | 0.3649 | 0.1137 | 0.4520 | 0.6110 | 0.5146 |
-
-**Improvements**
-
-- IoU: **+0.0638** (≈ 21.2% relative gain over V2)  
-- DWE: **−0.1186** (≈ 51.1% relative reduction vs V2)  
-
-This shows that the V3 training schedule, DWE-aware losses, and architectural tweaks significantly improve both accuracy and spatial error behavior.
-
-### 6.4 Qualitative Outputs (Recommended)
-
-This section highlights how the six-camera input is transformed into a BEV occupancy map and how prediction quality varies across strong, average, and failure cases.
+### 6.3 Qualitative Outputs
 
 #### Image-to-BEV Pipeline Visualization
 
@@ -253,15 +272,15 @@ This section highlights how the six-camera input is transformed into a BEV occup
 
 #### Best Validation Sample
 
-![Best validation sample with ground truth, prediction, and confidence](assets/readme/best_1.png)
+![Best validation sample](assets/readme/best_1.png)
 
 #### Random Validation Sample
 
-![Random validation sample with ground truth, prediction, and confidence](assets/readme/random_1.png)
+![Random validation sample](assets/readme/random_1.png)
 
 #### Worst Validation Sample
 
-![Worst validation sample with ground truth, prediction, and confidence](assets/readme/worst_1.png)
+![Worst validation sample](assets/readme/worst_1.png)
 
 ---
 
@@ -271,21 +290,23 @@ This section highlights how the six-camera input is transformed into a BEV occup
 
 ### Features
 
-- Scene browser for nuScenes mini validation data  
-- Featured scenario selection  
-- Upload mode with fixed nuScenes intrinsics/extrinsics  
-- BEV probability heatmap  
-- Binary occupancy map with TP / FP / FN color coding  
-- Hover-based cell inspection (distance from ego, probability, GT vs prediction)  
-- Threshold slider with live metric updates  
+- Scene browser for nuScenes mini validation data
+- Featured scenario selection
+- Upload mode with fixed nuScenes intrinsics/extrinsics
+- BEV probability heatmap
+- Binary occupancy map with TP / FP / FN color coding
+- Hover-based cell inspection (distance from ego, probability, GT vs prediction)
+- Threshold slider with live metric updates
 - Metrics panel (IoU, DWE, precision, recall, F1)
 
 ### Main API Routes
 
-- `GET /api/samples` – list available validation scenes  
-- `GET /api/sample-preview/{index}` – return camera previews for a sample  
-- `POST /api/predict-sample/{index}` – run inference on a dataset sample  
-- `POST /api/predict-upload` – run inference on 6 user-uploaded images  
+| Route | Description |
+|---|---|
+| `GET /api/samples` | List available validation scenes |
+| `GET /api/sample-preview/{index}` | Return camera previews for a sample |
+| `POST /api/predict-sample/{index}` | Run inference on a dataset sample |
+| `POST /api/predict-upload` | Run inference on 6 user-uploaded images |
 
 ---
 
@@ -358,21 +379,38 @@ This section highlights how the six-camera input is transformed into a BEV occup
 
 ## 10. Future Enhancements
 
-- Add temporal fusion over multiple frames  
-- Improve far-field occupancy accuracy  
-- Add Docker support for easy deployment  
-- Integrate experiment tracking dashboards  
-- Add explainability overlays for camera→BEV contributions  
-- Extend from binary occupancy to richer BEV semantics (e.g., drivable area, lanes, objects)  
+- Add temporal fusion over multiple frames
+- Improve far-field occupancy accuracy (currently IoU 0.31)
+- Add Docker support for easy deployment
+- Integrate experiment tracking dashboards
+- Add explainability overlays for camera→BEV feature contributions
+- Extend from binary occupancy to richer BEV semantics (drivable area, lanes, object classes)
 
 ---
 
 ## 11. Acknowledgments
 
-- **Hackathon**: Built for the **MAHE Mobility Challenge – Autonomous Mobility Hackathon**  
-- **Dataset**: nuScenes mini  
-- **Frameworks**: PyTorch and FastAPI  
-- **Focus Area**: Multi-camera BEV occupancy prediction and visualization  
+- **Hackathon**: Built for the **MAHE Mobility Challenge 2026** — Centre of Excellence in Autonomous Mobility, Manipal Institute of Technology Bengaluru
+- **Partners**: HARMAN · VTS · Department of Electronics & Communication Engineering
+- **Dataset**: nuScenes mini (Motional)
+- **Frameworks**: PyTorch and FastAPI
+- **Focus Area**: Multi-camera BEV occupancy prediction and visualization
+
+---
+
+## 12. Notes for Submission
+
+This repository satisfies all Manipal GitHub submission requirements:
+
+- ✅ Project overview
+- ✅ Model architecture
+- ✅ Dataset used
+- ✅ Setup & installation instructions
+- ✅ How to run the code
+- ✅ Example outputs / results
+
+Repository is **publicly accessible** at:  
+https://github.com/nirajj12/Bird-s-Eye-View-BEV-2D-Occupancy
 
 ---
 
@@ -409,4 +447,6 @@ This section highlights how the six-camera input is transformed into a BEV occup
   </tr>
 </table>
 
-⭐ If this project helped you, consider starring the repository.
+---
+
+⭐ If this project helped you, consider starring the repository!
