@@ -265,14 +265,14 @@ The FastAPI demo includes a cinematic BEV-style interface for scene selection, m
 | | LSS Transformer | Geometry Projection | Spatial Geometry + DWE Loss (Ours) |
 |---|---:|---:|---:|
 | **Overall IoU** | ~0.17 *(plateau ep.7)* | 0.3011 | **0.3649** |
-| **DWE** | 0.778558 | 0.2323 | **0.1137** |
+| **DWE** | — | 0.2323 | **0.1137** |
 | **Precision** | — | 0.4369 | **0.4520** |
 | **Recall** | — | 0.5218 | **0.6110** |
 | **F1 Score** | — | 0.4734 | **0.5146** |
 | **Near-ego IoU** | — | — | **0.6278** |
 | **Far-field IoU** | — | — | **0.3150** |
 
-> **What DWE = 0.11 means**: Our average spatially-weighted prediction error is 11% — with errors near the vehicle penalised up to 100× more than distant ones.
+> **What DWE = 0.11 means**: Our average spatially-weighted prediction error is 11% — with a false positive 1 metre from ego penalised 100× more than one 100 metres away, directly reflecting real emergency braking risk.
 
 > **Near-ego IoU = 0.63**: In the safety-critical zone within 12 metres, our model is correct nearly **two-thirds of the time**. That is the number an autonomous driving engineer actually cares about.
 
