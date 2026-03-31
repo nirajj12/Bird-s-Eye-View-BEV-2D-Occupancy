@@ -57,7 +57,7 @@ def tensor_to_b64(t):
 
 @app.get("/")
 async def index(request: Request):
-    return templates.TemplateResponse("index.html", {"request": request})
+    return templates.TemplateResponse(request=request, name="index.html")
 
 @app.get("/api/samples")
 async def get_samples():
